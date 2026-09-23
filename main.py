@@ -1,4 +1,4 @@
-# main.py - FINAL XAU - $3 Trailing - Render.com FIXED
+# main.py - FINAL XAU - $3 Trailing - WITH 5 MIN TEST CONFIRM
 import os, time, requests, json, asyncio, websockets
 import pandas as pd, yfinance as yf
 from flask import Flask
@@ -9,7 +9,6 @@ RR = 3.0
 LOT = 0.01
 ENABLE_TRAILING = True
 TRAILING_START = 3.0
-TRAILING_STEP = 2.0
 TRAILING_DISTANCE = 3.0
 
 DERIV_TOKEN = os.getenv("DERIV_TOKEN", "")
@@ -19,6 +18,7 @@ TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
 app = Flask(__name__)
+last_test_time = 0
 
 def tg(msg):
     print(msg)
@@ -32,12 +32,9 @@ def tg(msg):
 
 def get_candles(interval, period, count=250):
     try:
-        # yfinance valid intervals: 1m,2m,5m,15m,30m,60m,90m,1h,4h,1d
         df = yf.download("GC=F", period=period, interval=interval, progress=False, auto_adjust=False)
         if df.empty: 
-            print(f"Empty download interval={interval}")
             return None
-        # Fix column names for new yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close"})
@@ -88,11 +85,9 @@ async def place_mt5_async(bias, entry, sl, tp):
             order = {"mt5_new_trade": 1, "login": DERIV_MT5_LOGIN, "symbol": "XAUUSD", "volume": LOT, "type": "buy" if bias=="BULLISH" else "sell", "sl": float(sl), "tp": float(tp)}
             await ws.send(json.dumps(order))
             resp = json.loads(await ws.recv())
-            print(f"MT5 resp: {resp}")
             return resp
     except Exception as e:
         print(f"MT5 place error: {e}")
-        tg(f"❌ MT5 Error: {e}")
         return None
 
 async def trailing_async():
@@ -113,25 +108,33 @@ async def trailing_async():
                 curr = float(pos["current_price"])
                 sl = float(pos["sl"]) if pos["sl"] else 0
                 profit = (curr-entry) if pos["type"]=="buy" else (entry-curr)
-                profit_money = profit * 100 * LOT  # approx $ for XAU
+                profit_money = profit * 100 * LOT
                 if profit_money >= TRAILING_START:
                     new_sl = (curr - TRAILING_DISTANCE) if pos["type"]=="buy" else (curr + TRAILING_DISTANCE)
                     if (pos["type"]=="buy" and new_sl > sl) or (pos["type"]=="sell" and (sl==0 or new_sl < sl)):
                         await ws.send(json.dumps({"mt5_modify_position": 1, "login": DERIV_MT5_LOGIN, "ticket": ticket, "sl": float(new_sl), "tp": float(pos["tp"])}))
                         await ws.recv()
-                        tg(f"🔒 *TRAILING {pos['type'].upper()}* Ticket {ticket} New SL `{new_sl:.2f}` Locked +${profit_money:.2f}")
+                        tg(f"🔒 *TRAILING {pos['type'].upper()}* Ticket {ticket} New SL `{new_sl:.2f}` +${profit_money:.2f}")
     except Exception as e:
         print(f"Trailing err {e}")
 
 def bot_loop():
-    tg(f"🟢 *RENDER BOT STARTED* Lot {LOT} RR 1:{RR} Trail ${TRAILING_START} MT5 {DERIV_MT5_LOGIN}")
+    global last_test_time
+    tg(f"🟢 *RENDER BOT STARTED*\nLot {LOT} RR 1:{RR} Trail ${TRAILING_START}\nMT5 {DERIV_MT5_LOGIN}\nTest every 5 min")
     while True:
         try:
-            # FIXED INTERVALS - 240m changed to 4h
             df_h1 = get_candles("1h","10d",250)
             df_h4 = get_candles("4h","30d",250)
             df_15m = get_candles("15m","5d",100)
             df_5m = get_candles("5m","5d",100)
+
+            # --- 5 MIN TEST MESSAGE ---
+            if time.time() - last_test_time > 300:  # 300 sec = 5 min
+                h1_text = get_trend(df_h1) if df_h1 is not None else "loading"
+                h4_text = get_trend(df_h4) if df_h4 is not None else "loading"
+                tg(f"✅ *TEST ALIVE - 5 MIN CHECK*\nH1: {h1_text} | H4: {h4_text}\n15m candles: {len(df_15m) if df_15m is not None else 0}\nBot scanning... Next real signal when BOS + Liquidity")
+                last_test_time = time.time()
+            # --- END TEST ---
             
             if None not in [df_h1,df_h4,df_15m,df_5m]:
                 h1 = get_trend(df_h1)
@@ -145,9 +148,9 @@ def bot_loop():
                             entry=sig['entry']
                             sl=sig['sl']
                             tp=entry+abs(entry-sl)*RR if h1=="BULLISH" else entry-abs(entry-sl)*RR
-                            tg(f"🟢 *SIGNAL {h1}*\nEntry {entry:.2f}\nSL {sl:.2f}\nTP {tp:.2f}\nPlacing {LOT} lot...")
+                            tg(f"🟢 *SIGNAL {h1}*\nEntry {entry:.2f}\nSL {sl:.2f}\nTP {tp:.2f}")
                             asyncio.run(place_mt5_async(h1,entry,sl,tp))
-                            time.sleep(1800)  # Wait 30min before next trade
+                            time.sleep(1800)
             if ENABLE_TRAILING:
                 asyncio.run(trailing_async())
             time.sleep(15)
@@ -157,7 +160,7 @@ def bot_loop():
 
 @app.route('/')
 def home(): 
-    return f"Bot Live Fixed {LOT} Trail ${TRAILING_START} MT5 {DERIV_MT5_LOGIN}"
+    return f"Bot Live {LOT} Trail ${TRAILING_START} MT5 {DERIV_MT5_LOGIN} LastTest {int(last_test_time)}"
 
 threading.Thread(target=bot_loop, daemon=True).start()
 
